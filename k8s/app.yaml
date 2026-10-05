@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: github-assistant-agent
+  labels:
+    app: github-assistant-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: github-assistant-agent
+  template:
+    metadata:
+      labels:
+        app: github-assistant-agent
+    spec:
+      containers:
+        - name: api
+          image: github-assistant-agent:local
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /v1/readyz
+              port: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: github-assistant-agent
+spec:
+  selector:
+    app: github-assistant-agent
+  ports:
+    - port: 80
+      targetPort: 8080
