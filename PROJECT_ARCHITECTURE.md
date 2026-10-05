@@ -15,7 +15,9 @@ flowchart LR
     M0["src/ghagent/__init__.py"]
     M1["src/ghagent/agent.py"]
     M2["src/ghagent/main.py"]
+    M3["src/ghagent/ops.py"]
     M2 -->|imports| M1
+    M2 -->|imports| M3
 ```
 
 For Python repositories, arrows show resolved local imports, not network calls or deployment order. Otherwise the diagram is a repository component map; containment arrows do not assert runtime integration.
@@ -25,19 +27,39 @@ For Python repositories, arrows show resolved local imports, not network calls o
 | Component | Responsibility |
 | --- | --- |
 | [`src/ghagent/main.py`](src/ghagent/main.py) | HTTP handlers: `GET /healthz`, `POST /agent/run` |
+| [`src/ghagent/ops.py`](src/ghagent/ops.py) | HTTP handlers: `GET /readyz`, `POST /workspaces`, `GET /workspaces`, `POST /workspaces/{workspace_id}/jobs`, `GET /jobs/{job_id}` |
 | [`src/ghagent/agent.py`](src/ghagent/agent.py) | Functions: `run` |
 | [`requirements.txt`](requirements.txt) | Implementation or supporting configuration |
 | [`src/ghagent/__init__.py`](src/ghagent/__init__.py) | Implementation or supporting configuration |
+| [`Dockerfile`](Dockerfile) | Container build/service configuration |
+| [`Makefile`](Makefile) | Implementation or supporting configuration |
+| [`docker-compose.yml`](docker-compose.yml) | Container build/service configuration |
 | [`tests/test_agent.py`](tests/test_agent.py) | Executable checks and regression examples |
+| [`tests/test_ops.py`](tests/test_ops.py) | Executable checks and regression examples |
 | [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | GitHub Actions job definitions |
 | [`README.md`](README.md) | Project explanations or operating notes |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Project explanations or operating notes |
+
+## Existing design and operating guides
+
+These checked-in guides provide the project’s detailed design, operational context, or deployment view:
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Request interface
 
 | Method and path | Handler | Source |
 | --- | --- | --- |
-| `GET /healthz` | `healthz` | [`src/ghagent/main.py`](src/ghagent/main.py#L8) |
-| `POST /agent/run` | `post_run` | [`src/ghagent/main.py`](src/ghagent/main.py#L13) |
+| `GET /healthz` | `healthz` | [`src/ghagent/main.py`](src/ghagent/main.py#L10) |
+| `POST /agent/run` | `post_run` | [`src/ghagent/main.py`](src/ghagent/main.py#L15) |
+| `GET /readyz` | `readyz` | [`src/ghagent/ops.py`](src/ghagent/ops.py#L44) |
+| `POST /workspaces` | `create_workspace` | [`src/ghagent/ops.py`](src/ghagent/ops.py#L49) |
+| `GET /workspaces` | `list_workspaces` | [`src/ghagent/ops.py`](src/ghagent/ops.py#L66) |
+| `POST /workspaces/{workspace_id}/jobs` | `create_job` | [`src/ghagent/ops.py`](src/ghagent/ops.py#L73) |
+| `GET /jobs/{job_id}` | `get_job` | [`src/ghagent/ops.py`](src/ghagent/ops.py#L96) |
+| `POST /jobs/{job_id}/approve` | `approve_job` | [`src/ghagent/ops.py`](src/ghagent/ops.py#L105) |
+| `GET /audit` | `audit` | [`src/ghagent/ops.py`](src/ghagent/ops.py#L122) |
+| `GET /metrics` | `metrics` | [`src/ghagent/ops.py`](src/ghagent/ops.py#L138) |
 
 The table lists literal route decorators found in the inspected Python modules. Router prefixes and middleware can add behavior; check the linked handler and application setup before calling an endpoint.
 
@@ -64,13 +86,18 @@ def run(goal, payload):
 | Explicit exception | Source |
 | --- | --- |
 | `InputError('goal is empty')` | [`src/ghagent/agent.py`](src/ghagent/agent.py#L11) |
-| `HTTPException(status_code=422, detail=str(exc))` | [`src/ghagent/main.py`](src/ghagent/main.py#L17) |
+| `HTTPException(status_code=422, detail=str(exc))` | [`src/ghagent/main.py`](src/ghagent/main.py#L19) |
+| `HTTPException(status_code=404, detail='workspace not found')` | [`src/ghagent/ops.py`](src/ghagent/ops.py#L77) |
+| `HTTPException(status_code=404, detail='job not found')` | [`src/ghagent/ops.py`](src/ghagent/ops.py#L100) |
+| `HTTPException(status_code=404, detail='job not found')` | [`src/ghagent/ops.py`](src/ghagent/ops.py#L109) |
+| `HTTPException(status_code=403, detail='production apply is disabled in this lab')` | [`src/ghagent/ops.py`](src/ghagent/ops.py#L113) |
 
 These are explicit exceptions in the inspected source, rather than a claim that every failure is handled. Follow the calling handler to see whether the exception becomes an HTTP response or propagates.
 
 ## Data and state
 
 - [`src/ghagent/agent.py`](src/ghagent/agent.py) defines module-level containers: `TOOLS`.
+- [`src/ghagent/ops.py`](src/ghagent/ops.py) defines module-level containers: `_WORKSPACES`, `_JOBS`, `_AUDIT`, `_METRICS`.
 
 Module-level dictionaries/lists live in a Python process. They can be fixtures or mutable state; inspect writes before treating them as persistent storage. A production extension would need to define persistence and concurrency behavior explicitly.
 
@@ -96,6 +123,12 @@ The implementation in [`src/ghagent/agent.py`](src/ghagent/agent.py#L9) branches
 
 A useful extension is a table-driven test that covers each condition just below, at, and above its boundary where applicable. These expressions are the current rules; changing them changes behavior and should be justified by the project’s acceptance criteria.
 
+### What does the operations plane add, and where is its limit
+
+[`src/ghagent/ops.py`](src/ghagent/ops.py) declares `GET /readyz`, `POST /workspaces`, `GET /workspaces`, `POST /workspaces/{workspace_id}/jobs`, `GET /jobs/{job_id}`, `POST /jobs/{job_id}/approve`, `GET /audit`, `GET /metrics`. Inspect the application’s `include_router` call for its URL prefix.
+
+Its state containers are `_WORKSPACES`, `_JOBS`, `_AUDIT`, `_METRICS`. The job-approval handler defines whether a target is accepted or refused; check that branch and the associated tests instead of treating a recorded job as a successful infrastructure apply.
+
 ## Setup and verification
 
 The following commands are derived from the checked-in dependency/test contracts. Execute them from the repository root; the block prepares a local environment, not a cloud deployment.
@@ -109,7 +142,7 @@ python -m pytest -q
 
 Python dependencies: [`requirements.txt`](requirements.txt).
 
-Test entry points: [`tests/test_agent.py`](tests/test_agent.py).
+Test entry points: [`tests/test_agent.py`](tests/test_agent.py), [`tests/test_ops.py`](tests/test_ops.py).
 
 Automation definitions: [`.github/workflows/ci.yml`](.github/workflows/ci.yml). Read their triggers and job steps to determine what CI actually runs.
 
